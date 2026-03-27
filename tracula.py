@@ -39,16 +39,16 @@ def get_data(layout, subject_label, freesurfer_dir, truly_longitudinal_study, se
     else:
         subject_session_info = {"subject": subject_label}
 
-    dwi_files = [f.filename for f in layout.get(type="dwi", modality="dwi", extensions=["nii", "nii.gz"],
-                                                **subject_session_info)]
-    bvecs_files = layout.get_bvecs(**subject_session_info)
+    dwi_files = [f.path for f in layout.get(suffix="dwi", datatype="dwi", extension=[".nii", ".nii.gz"],
+                                            **subject_session_info)]
+    bvecs_files = [f.path for f in layout.get(suffix="dwi", extension=".bvec", **subject_session_info)]
     if not bvecs_files:
         # if bvecs only in root dir
-        bvecs_files = layout.get_bvecs()
-    bvals_files = layout.get_bvals(**subject_session_info)
+        bvecs_files = [f.path for f in layout.get(suffix="dwi", extension=".bvec")]
+    bvals_files = [f.path for f in layout.get(suffix="dwi", extension=".bval", **subject_session_info)]
     if not bvals_files:
         # if bvals only in root dir
-        bvals_files = layout.get_bvals()
+        bvals_files = [f.path for f in layout.get(suffix="dwi", extension=".bval")]
 
     # check if all data is there
     if not dwi_files:
@@ -260,7 +260,7 @@ def calculate_tmi(df):
     return df
 
 
-def run_fs_if_not_available(args, subject_label, sessions=[]):
+def run_fs_if_not_available(layout, subject_label, freesurfer_dir, n_cpus, sessions=[]):
     freesurfer_subjects = []
 
     if len(sessions) > 1:
@@ -276,27 +276,51 @@ def run_fs_if_not_available(args, subject_label, sessions=[]):
 
     fs_missing = False
     for fss in freesurfer_subjects:
-        if not os.path.exists(os.path.join(args.freesurfer_dir, fss, "scripts/recon-all.done")):
+        if not os.path.exists(os.path.join(freesurfer_dir, fss, "scripts/recon-all.done")):
             fs_missing = True
 
     if fs_missing:
-        if args.run_freesurfer_tests_only:
-            add_opt = "--steps cross-sectional --stages autorecon1"
+        print("FreeSurfer for {} not found. Running recon-all.".format(subject_label))
+
+        # find T1w images for this subject
+        t1w_files = [f.path for f in layout.get(subject=subject_label, datatype="anat", suffix="T1w",
+                                                extension=[".nii", ".nii.gz"])]
+        if not t1w_files:
+            raise Exception("No T1w files found for subject %s" % subject_label)
+
+        if len(sessions) > 1:
+            # longitudinal: run cross-sectional per session, then template, then longitudinal
+            for session_label in sessions:
+                ses_t1w = [f.path for f in layout.get(subject=subject_label, session=session_label,
+                                                      datatype="anat", suffix="T1w",
+                                                      extension=[".nii", ".nii.gz"])]
+                subject_id = "sub-{sub}_ses-{ses}".format(sub=subject_label, ses=session_label)
+                if ses_t1w:
+                    input_flags = " ".join(["-i " + f for f in ses_t1w])
+                    cmd = "recon-all -s {sid} {inputs} -all -openmp {n_cpus}".format(
+                        sid=subject_id, inputs=input_flags, n_cpus=n_cpus)
+                    run_cmd(cmd, env={"SUBJECTS_DIR": freesurfer_dir})
+
+            # create base template
+            base_id = "sub-{sub}".format(sub=subject_label)
+            tp_flags = " ".join(["-tp sub-{sub}_ses-{ses}".format(sub=subject_label, ses=s) for s in sessions])
+            cmd = "recon-all -base {base} {tps} -all -openmp {n_cpus}".format(
+                base=base_id, tps=tp_flags, n_cpus=n_cpus)
+            run_cmd(cmd, env={"SUBJECTS_DIR": freesurfer_dir})
+
+            # run longitudinal
+            for session_label in sessions:
+                subject_id = "sub-{sub}_ses-{ses}".format(sub=subject_label, ses=session_label)
+                cmd = "recon-all -long {sid} {base} -all -openmp {n_cpus}".format(
+                    sid=subject_id, base=base_id, n_cpus=n_cpus)
+                run_cmd(cmd, env={"SUBJECTS_DIR": freesurfer_dir})
         else:
-            add_opt = ""
-
-        cmd = "run_freesurfer.py {in_dir} {out_dir} participant " \
-              "--participant_label {subject_label} " \
-              "--license_key {license_key} " \
-              "--n_cpus {n_cpus} {add_opt}".format(in_dir=args.bids_dir,
-                                                   out_dir=args.freesurfer_dir,
-                                                   subject_label=subject_label,
-                                                   license_key=args.license_key,
-                                                   n_cpus=args.n_cpus,
-                                                   add_opt=add_opt)
-
-        print("Freesurfer for {} not found. Running recon-all.".format(subject_label))
-        run_cmd(cmd)
+            # cross-sectional
+            subject_id = "sub-{sub}".format(sub=subject_label)
+            input_flags = " ".join(["-i " + f for f in t1w_files])
+            cmd = "recon-all -s {sid} {inputs} -all -openmp {n_cpus}".format(
+                sid=subject_id, inputs=input_flags, n_cpus=n_cpus)
+            run_cmd(cmd, env={"SUBJECTS_DIR": freesurfer_dir})
 
 
 def check_minimal_data_reqs(layout, subject_label, sessions_to_analyze):
@@ -305,16 +329,16 @@ def check_minimal_data_reqs(layout, subject_label, sessions_to_analyze):
     #   valid_subject: boolean; if True subject has sufficient data to run traclula
     #   valid_sessions: list; for long data: list of sessions with sufficient data
 
-    n_dwi = len(layout.get(subject=subject_label, modality="dwi", type="dwi"))
-    n_t1w = len(layout.get(subject=subject_label, modality="anat", type="T1w"))
+    n_dwi = len(layout.get(subject=subject_label, datatype="dwi", suffix="dwi"))
+    n_t1w = len(layout.get(subject=subject_label, datatype="anat", suffix="T1w"))
     if (n_dwi > 0) & (n_t1w > 0):
         valid_subject = True
     else:
         valid_subject = False
 
     # get sessions that have at least one dwi and one t1w image
-    dwi_sessions = layout.get_sessions(subject=subject_label, modality="dwi", type="dwi")
-    t1w_sessions = layout.get_sessions(subject=subject_label, modality="anat", type="T1w")
+    dwi_sessions = layout.get_sessions(subject=subject_label, datatype="dwi", suffix="dwi")
+    t1w_sessions = layout.get_sessions(subject=subject_label, datatype="anat", suffix="T1w")
     sessions = list(set(dwi_sessions) & set(t1w_sessions))
 
     if sessions_to_analyze:
@@ -328,8 +352,8 @@ def check_minimal_data_reqs(layout, subject_label, sessions_to_analyze):
     valid_sessions = []
     if valid_subject:
         for session in sessions:
-            n_dwi = len(layout.get(subject=subject_label, session=session, modality="dwi", type="dwi"))
-            n_t1w = len(layout.get(subject=subject_label, session=session, modality="anat", type="T1w"))
+            n_dwi = len(layout.get(subject=subject_label, session=session, datatype="dwi", suffix="dwi"))
+            n_t1w = len(layout.get(subject=subject_label, session=session, datatype="anat", suffix="T1w"))
             if (n_dwi > 0) & (n_t1w > 0):
                 valid_sessions.append(session)
 
@@ -351,45 +375,44 @@ def participant_level(args, layout, subjects_to_analyze, sessions_to_analyze):
 
         if valid_subject:
             # check for freesurfer and run if missing
-            run_fs_if_not_available(args, subject_label, valid_sessions)
+            run_fs_if_not_available(layout, subject_label, args.freesurfer_dir, args.n_cpus, valid_sessions)
 
-            if not args.run_freesurfer_tests_only:
-                # run full tracula processing
-                if valid_sessions and truly_longitudinal_study:
-                    # long
-                    for session_label in valid_sessions:
-                        dwi_files, bvecs_files, bvals_files = get_data(layout, subject_label,
-                                                                       args.freesurfer_dir,
-                                                                       truly_longitudinal_study,
-                                                                       session_label=session_label)
-
-                        subject_session_name = "sub-" + subject_label + "_ses-" + session_label
-                        subject_session_info[subject_session_name] = {"dwi_files": dwi_files,
-                                                                      "bvecs_files": bvecs_files,
-                                                                      "bvals_files": bvals_files,
-                                                                      "base": "sub-" + subject_label}
-
-                else:
-                    # cross
-                    subject_session_name = "sub-" + subject_label
-                    dwi_files, bvecs_files, bvals_files = get_data(layout,
-                                                                   subject_label,
+            # run full tracula processing
+            if valid_sessions and truly_longitudinal_study:
+                # long
+                for session_label in valid_sessions:
+                    dwi_files, bvecs_files, bvals_files = get_data(layout, subject_label,
                                                                    args.freesurfer_dir,
-                                                                   truly_longitudinal_study)
+                                                                   truly_longitudinal_study,
+                                                                   session_label=session_label)
+
+                    subject_session_name = "sub-" + subject_label + "_ses-" + session_label
                     subject_session_info[subject_session_name] = {"dwi_files": dwi_files,
                                                                   "bvecs_files": bvecs_files,
                                                                   "bvals_files": bvals_files,
-                                                                  "base": ""}
+                                                                  "base": "sub-" + subject_label}
 
-                if subject_session_info:
-                    subject_output_dir = os.path.join(args.output_dir, "sub-" + subject_label)
-                    if not os.path.exists(subject_output_dir):
-                        os.makedirs(subject_output_dir)
+            else:
+                # cross
+                subject_session_name = "sub-" + subject_label
+                dwi_files, bvecs_files, bvals_files = get_data(layout,
+                                                               subject_label,
+                                                               args.freesurfer_dir,
+                                                               truly_longitudinal_study)
+                subject_session_info[subject_session_name] = {"dwi_files": dwi_files,
+                                                              "bvecs_files": bvecs_files,
+                                                              "bvals_files": bvals_files,
+                                                              "base": ""}
 
-                    # create dmrirc file and run trac-all commands
-                    dmrirc_file = create_dmrirc(args.freesurfer_dir, args.output_dir, subject_label,
-                                                subject_session_info)
-                    run_tract_all(dmrirc_file, args.output_dir, subject_label, args.stages, args.n_cpus)
+            if subject_session_info:
+                subject_output_dir = os.path.join(args.output_dir, "sub-" + subject_label)
+                if not os.path.exists(subject_output_dir):
+                    os.makedirs(subject_output_dir)
+
+                # create dmrirc file and run trac-all commands
+                dmrirc_file = create_dmrirc(args.freesurfer_dir, args.output_dir, subject_label,
+                                            subject_session_info)
+                run_tract_all(dmrirc_file, args.output_dir, subject_label, args.stages, args.n_cpus)
         else:
             warn("Subject {} has not enough data to run TRACULA".format(subject_label))
 
@@ -400,17 +423,20 @@ def group_level_motion_stats(args, subjects_to_analyze):
     if not os.path.exists(motion_output_dir):
         os.makedirs(motion_output_dir)
     motion_output_file = os.path.join(motion_output_dir, "group_motion.tsv")
-    df = pd.DataFrame([])
+    dfs = []
     for subject_label in subjects_to_analyze:
         sessions = get_sessions(args.output_dir, subject_label)
 
         if sessions:
             for session_label in sessions:
                 df_subject = load_subject_motion_file(args.output_dir, subject_label, session_label)
-                df = df.append(df_subject)
+                if df_subject is not None:
+                    dfs.append(df_subject)
         else:
             df_subject = load_subject_motion_file(args.output_dir, subject_label, session_label="")
-            df = df.append(df_subject)
+            if df_subject is not None:
+                dfs.append(df_subject)
+    df = pd.concat(dfs) if dfs else pd.DataFrame()
     df = calculate_tmi(df)
     df.index.name = "participant_id"
     df.to_csv(motion_output_file, sep="\t")
