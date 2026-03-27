@@ -2,10 +2,10 @@
 # https://github.com/NeuroDesk/neurocontainers
 
 # Stage 1: FSL binaries
-FROM ghcr.io/neurodesk/fsl:6.0.7.19 AS fsl-stage
+FROM ghcr.io/neurodesk/fsl_6.0.7.19:latest AS fsl-stage
 
 # Stage 2: FreeSurfer base + FSL + BIDS App layer
-FROM ghcr.io/neurodesk/freesurfer:8.0.0
+FROM ghcr.io/neurodesk/freesurfer_8.0.0:latest
 
 ARG DEBIAN_FRONTEND="noninteractive"
 
