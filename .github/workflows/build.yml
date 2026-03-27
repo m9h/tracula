@@ -17,7 +17,7 @@ jobs:
 
       - name: Verify binaries
         run: |
-          docker run --rm tracula-neurodesk bash -c '
+          docker run --rm --entrypoint bash tracula-neurodesk -c '
             echo "=== FreeSurfer ==="
             echo "FREESURFER_HOME=$FREESURFER_HOME"
             which recon-all && recon-all --version 2>/dev/null | head -1
